@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "stats.hpp"
 #include "config/config.hpp"
 #include "common/exception.hpp"
 #include "extract/extract.hpp"
@@ -234,9 +235,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         { pass.preCopySemaphores.at(1).handle() });
 
     // Wait for the pre-copy to finish before telling framegen to start.
-    // This is a device-wide idle wait — heavier than semaphore-based sync
-    // but necessary because OPAQUE_FD is not available on Android.
-    Layer::ovkQueueSubmit(info.queue.second, 0, nullptr, VK_NULL_HANDLE);
+    // vkQueueSubmit with submitCount=0 does not wait; without this, framegen
+    // can sample partially updated AHB inputs and flicker.
+    auto waitRes = Layer::ovkQueueWaitIdle(info.queue.second);
+    if (waitRes != VK_SUCCESS)
+        throw LSFG::vulkan_error(waitRes, "Failed to wait for pre-copy queue");
 
     // 2. Tell framegen to generate intermediary frames
     //    presentContext(id, -1, {}) — no semaphore FDs, synchronous
@@ -295,6 +298,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+        Stats::recordGeneratedPresent(conf.multiplier);
     }
 
     // 5. present actual next frame (the real capture, not a generated one)
@@ -312,6 +316,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+    Stats::recordRealPresent(conf.multiplier);
 
     this->frameIdx++;
     return res;
@@ -403,6 +408,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+        Stats::recordGeneratedPresent(conf.multiplier);
     }
 
     // 6. present actual next frame
@@ -419,6 +425,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+    Stats::recordRealPresent(conf.multiplier);
 
     this->frameIdx++;
     return res;

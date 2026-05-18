@@ -39,6 +39,10 @@ target_include_directories(lsfg-vk-framegen
 target_link_libraries(lsfg-vk-framegen
     PUBLIC volk)
 
+if(ANDROID)
+    target_compile_definitions(lsfg-vk-framegen PUBLIC VK_USE_PLATFORM_ANDROID_KHR)
+endif()
+
 # diagnostics
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(lsfg-vk-framegen PROPERTIES

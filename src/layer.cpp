@@ -59,6 +59,7 @@ namespace {
 #endif
     PFN_vkGetDeviceQueue next_vkGetDeviceQueue{};
     PFN_vkQueueSubmit next_vkQueueSubmit{};
+    PFN_vkQueueWaitIdle next_vkQueueWaitIdle{};
     PFN_vkCmdPipelineBarrier next_vkCmdPipelineBarrier{};
     PFN_vkCmdBlitImage next_vkCmdBlitImage{};
     PFN_vkAcquireNextImageKHR next_vkAcquireNextImageKHR{};
@@ -235,6 +236,7 @@ namespace {
 #endif
             success &= initDeviceFunc(*pDevice, "vkGetDeviceQueue", &next_vkGetDeviceQueue);
             success &= initDeviceFunc(*pDevice, "vkQueueSubmit", &next_vkQueueSubmit);
+            success &= initDeviceFunc(*pDevice, "vkQueueWaitIdle", &next_vkQueueWaitIdle);
             success &= initDeviceFunc(*pDevice, "vkCmdPipelineBarrier", &next_vkCmdPipelineBarrier);
             success &= initDeviceFunc(*pDevice, "vkCmdBlitImage", &next_vkCmdBlitImage);
             success &= initDeviceFunc(*pDevice, "vkAcquireNextImageKHR", &next_vkAcquireNextImageKHR);
@@ -516,6 +518,9 @@ namespace Layer {
             const VkSubmitInfo* pSubmits,
             VkFence fence) {
         return next_vkQueueSubmit(queue, submitCount, pSubmits, fence);
+    }
+    VkResult ovkQueueWaitIdle(VkQueue queue) {
+        return next_vkQueueWaitIdle(queue);
     }
 
     void ovkCmdPipelineBarrier(

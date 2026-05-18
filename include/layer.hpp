@@ -197,6 +197,9 @@ namespace Layer {
         uint32_t submitCount,
         const VkSubmitInfo* pSubmits,
         VkFence fence);
+    /// Call to the original vkQueueWaitIdle function.
+    VkResult ovkQueueWaitIdle(
+        VkQueue queue);
 
     /// Call to the original vkCmdPipelineBarrier function.
     void ovkCmdPipelineBarrier(

@@ -11,6 +11,7 @@ set(CMAKE_CXX_VISIBILITY_PRESET "hidden")
 
 if(LSFGVK_ANDROID_WINE)
     add_compile_definitions(LSFGVK_ANDROID_WINE=1)
+    set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_ANDROID_KHR CACHE STRING "" FORCE)
 endif()
 
 # subprojects
@@ -37,6 +38,8 @@ file(GLOB SOURCES
     "src/utils/*.cpp"
     "src/*.cpp"
 )
+list(APPEND SOURCES "src/stats.cpp")
+list(REMOVE_DUPLICATES SOURCES)
 
 add_library(lsfg-vk SHARED ${SOURCES})
 
@@ -51,7 +54,7 @@ target_link_libraries(lsfg-vk PRIVATE
     lsfg-vk-framegen)
 
 if(ANDROID)
-    target_link_libraries(lsfg-vk PRIVATE android)
+    target_link_libraries(lsfg-vk PRIVATE android log)
     target_include_directories(lsfg-vk PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
 endif()
 
