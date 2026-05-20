@@ -60,14 +60,21 @@ namespace Utils {
     /// @param height The height of the image to copy.
     /// @param pre The pipeline stage to wait on.
     /// @param post The pipeline stage to provide after the copy.
-    /// @param makeSrcPresentable If true, the source image will be made presentable after the copy.
-    /// @param makeDstPresentable If true, the destination image will be made presentable after the copy.
+    /// @param makeSrcPresentable If true, transition source to PRESENT_SRC_KHR after the copy.
+    /// @param makeDstPresentable If true, transition destination to PRESENT_SRC_KHR after the copy.
+    /// @param srcIsExternalAhb If true, treat src as AHB-shared with framegen: insert
+    ///        VK_QUEUE_FAMILY_EXTERNAL acquire/release barriers in GENERAL layout.
+    /// @param dstIsExternalAhb Same as srcIsExternalAhb but for the destination image.
+    /// @param queueFamilyIdx Local queue family index, used when src/dstIsExternalAhb is true.
     ///
     void copyImage(VkCommandBuffer buf,
             VkImage src, VkImage dst,
             uint32_t width, uint32_t height,
             VkPipelineStageFlags pre, VkPipelineStageFlags post,
-            bool makeSrcPresentable, bool makeDstPresentable);
+            bool makeSrcPresentable, bool makeDstPresentable,
+            bool srcIsExternalAhb = false,
+            bool dstIsExternalAhb = false,
+            uint32_t queueFamilyIdx = VK_QUEUE_FAMILY_IGNORED);
 
     ///
     /// Log a message at most n times.

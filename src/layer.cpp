@@ -501,6 +501,8 @@ namespace Layer {
             VkDevice device,
             const AHardwareBuffer* hardwareBuffer,
             VkAndroidHardwareBufferPropertiesANDROID* pProperties) {
+        if (next_vkGetAndroidHardwareBufferPropertiesANDROID == nullptr)
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
         return next_vkGetAndroidHardwareBufferPropertiesANDROID(device, hardwareBuffer, pProperties);
     }
 #endif
