@@ -93,12 +93,28 @@ void Utils::copyImage(VkCommandBuffer buf,
         VkImage src, VkImage dst,
         uint32_t width, uint32_t height,
         VkPipelineStageFlags pre, VkPipelineStageFlags post,
-        bool makeSrcPresentable, bool makeDstPresentable) {
+        bool makeSrcPresentable, bool makeDstPresentable,
+        bool srcIsExternalAhb, bool dstIsExternalAhb,
+        uint32_t queueFamilyIdx) {
+    // When an image is AHB-shared with a separate VkDevice (framegen), we must
+    // do queue-family ownership acquire/release pairs through VK_QUEUE_FAMILY_EXTERNAL.
+    // framegen's release leaves the image in VK_IMAGE_LAYOUT_GENERAL, so we must
+    // declare oldLayout=GENERAL on acquire and newLayout=GENERAL on release. Without
+    // these pairs, Turnip provides no cross-VkDevice cache coherence and reads stale
+    // (previous-frame) AHB contents — the visible symptom is old-frame flickering.
     const VkImageMemoryBarrier srcBarrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .oldLayout = srcIsExternalAhb
+            ? VK_IMAGE_LAYOUT_GENERAL
+            : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = srcIsExternalAhb
+            ? static_cast<uint32_t>(VK_QUEUE_FAMILY_EXTERNAL)
+            : static_cast<uint32_t>(VK_QUEUE_FAMILY_IGNORED),
+        .dstQueueFamilyIndex = srcIsExternalAhb
+            ? queueFamilyIdx
+            : static_cast<uint32_t>(VK_QUEUE_FAMILY_IGNORED),
         .image = src,
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -109,7 +125,17 @@ void Utils::copyImage(VkCommandBuffer buf,
     const VkImageMemoryBarrier dstBarrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        // Dst is always about to be overwritten, so UNDEFINED is always safe
+        // (and avoids first-frame mismatch when the AHB image hasn't yet been
+        // released to GENERAL by framegen — its initialLayout is UNDEFINED).
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = dstIsExternalAhb
+            ? static_cast<uint32_t>(VK_QUEUE_FAMILY_EXTERNAL)
+            : static_cast<uint32_t>(VK_QUEUE_FAMILY_IGNORED),
+        .dstQueueFamilyIndex = dstIsExternalAhb
+            ? queueFamilyIdx
+            : static_cast<uint32_t>(VK_QUEUE_FAMILY_IGNORED),
         .image = dst,
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -149,7 +175,29 @@ void Utils::copyImage(VkCommandBuffer buf,
         VK_FILTER_NEAREST
     );
 
-    if (makeSrcPresentable) {
+    // Trailing barriers. AHB release takes precedence over makeSrc/DstPresentable
+    // because the AHB images are never directly presented — they go through framegen.
+    if (srcIsExternalAhb) {
+        const VkImageMemoryBarrier releaseBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = queueFamilyIdx,
+            .dstQueueFamilyIndex = static_cast<uint32_t>(VK_QUEUE_FAMILY_EXTERNAL),
+            .image = src,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = 1
+            }
+        };
+        Layer::ovkCmdPipelineBarrier(buf,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, post, 0,
+            0, nullptr, 0, nullptr,
+            1, &releaseBarrier);
+    } else if (makeSrcPresentable) {
         const VkImageMemoryBarrier presentBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -167,7 +215,27 @@ void Utils::copyImage(VkCommandBuffer buf,
             1, &presentBarrier);
     }
 
-    if (makeDstPresentable) {
+    if (dstIsExternalAhb) {
+        const VkImageMemoryBarrier releaseBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = queueFamilyIdx,
+            .dstQueueFamilyIndex = static_cast<uint32_t>(VK_QUEUE_FAMILY_EXTERNAL),
+            .image = dst,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = 1
+            }
+        };
+        Layer::ovkCmdPipelineBarrier(buf,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, post, 0,
+            0, nullptr, 0, nullptr,
+            1, &releaseBarrier);
+    } else if (makeDstPresentable) {
         const VkImageMemoryBarrier presentBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,

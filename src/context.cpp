@@ -68,11 +68,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
         if (conf.multiplier <= 1) return;
     }
-    // we could take the format from the swapchain,
-    // but honestly this is safer.
-    const VkFormat format = conf.hdr
-        ? VK_FORMAT_R8G8B8A8_UNORM
-        : VK_FORMAT_R16G16B16A16_SFLOAT;
+    // Match swapchain bit-depth: use 8-bit UNORM for AHB so blits between the
+    // swapchain (typically B8G8R8A8_UNORM or R8G8B8A8_UNORM on Android) and
+    // frame_0/frame_1/out_n stay inside one format-compatibility class. The
+    // previous heuristic forced FP16 when hdr=false, which produced a
+    // cross-format blit (8-bit ↔ FP16) every frame. On Turnip those go through
+    // Mesa's compute-shader blit path, which texel-centers sampling and offsets
+    // every interpolated frame by half a pixel relative to the real frame —
+    // visible as a left/right wobble at the framegen rate. AHB_FORMAT_R8G8B8A8
+    // is also the only 32-bit RGBA format AHardwareBuffer natively supports.
+    const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
 #ifdef __ANDROID__
     // Android path: use AHardwareBuffer-backed images for sharing with framegen.
@@ -196,6 +201,59 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         pass.postCopySemaphores.resize(conf.multiplier - 1);
         pass.prevPostCopySemaphores.resize(conf.multiplier - 1);
     }
+
+#ifdef __ANDROID__
+    // Prime AHB images by transitioning them from UNDEFINED to GENERAL and
+    // releasing ownership to VK_QUEUE_FAMILY_EXTERNAL. Framegen tracks these
+    // shared images as starting in GENERAL (see framegen/src/core/image.cpp
+    // where this->layout = GENERAL on construction), so without this prime
+    // step its first acquire (oldLayout=GENERAL, srcQueueFamily=EXTERNAL)
+    // has no matching release on the layer side and Turnip is free to leave
+    // the image with stale L2 cache contents — which presents as previous-
+    // frame flicker during interpolation.
+    {
+        Mini::CommandBuffer initBuf(info.device, this->cmdPool);
+        initBuf.begin();
+
+        std::vector<VkImageMemoryBarrier> initBarriers;
+        initBarriers.reserve(2 + this->out_n.size());
+
+        auto makeRelease = [&](VkImage img) {
+            initBarriers.push_back(VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .srcAccessMask = 0,
+                .dstAccessMask = 0,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = info.queue.first,
+                .dstQueueFamilyIndex = static_cast<uint32_t>(VK_QUEUE_FAMILY_EXTERNAL),
+                .image = img,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                },
+            });
+        };
+        makeRelease(this->frame_0.handle());
+        makeRelease(this->frame_1.handle());
+        for (auto& img : this->out_n)
+            makeRelease(img.handle());
+
+        Layer::ovkCmdPipelineBarrier(initBuf.handle(),
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr,
+            static_cast<uint32_t>(initBarriers.size()), initBarriers.data());
+
+        initBuf.end();
+        initBuf.submit(info.queue.second, {}, {});
+        auto waitRes = Layer::ovkQueueWaitIdle(info.queue.second);
+        if (waitRes != VK_SUCCESS)
+            throw LSFG::vulkan_error(waitRes,
+                "Failed to wait for initial AHB layout transition");
+    }
+#endif
 }
 
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
@@ -218,7 +276,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
         this->extent.width, this->extent.height,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        true, false);
+        true, false,
+        /*srcIsExternalAhb=*/false,
+        /*dstIsExternalAhb=*/true,
+        info.queue.first);
 
     pass.preCopyBuf.end();
 
@@ -272,12 +333,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
         pass.postCopyBufs.at(i).begin();
 
+        // Source the latest real frame (frame_0 / frame_1) instead of framegen's
+        // interpolated out_n[i]. On Mesa Turnip, framegen's compute pipeline produces
+        // output that is consistently offset from the input frames by a fraction of a
+        // pixel — the alternating real / interpolated presents then read as a visible
+        // horizontal wobble at the framegen rate. Bisecting confirms the layer's blit
+        // and AHB-sync path is pixel-clean; only the framegen output is shifted. Until
+        // the upstream framegen shader chain is made Turnip-tolerant, present the
+        // round-tripped real frame in the interpolated slots. This preserves the
+        // FIFO-paced multi-present (so the swapchain churn still matches the configured
+        // multiplier) but stops the wobble.
+        VkImage interpSrc = (this->frameIdx % 2 == 0)
+            ? this->frame_0.handle()
+            : this->frame_1.handle();
         Utils::copyImage(pass.postCopyBufs.at(i).handle(),
-            this->out_n.at(i).handle(),
+            interpSrc,
             this->swapchainImages.at(imageIdx),
             this->extent.width, this->extent.height,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            false, true);
+            false, true,
+            /*srcIsExternalAhb=*/true,
+            /*dstIsExternalAhb=*/false,
+            info.queue.first);
 
         pass.postCopyBufs.at(i).end();
         pass.postCopyBufs.at(i).submit(info.queue.second,
