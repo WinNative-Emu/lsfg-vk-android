@@ -131,15 +131,16 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
                 "Unsupported VkFormat for AHB allocation");
     }
 
-    // Allocate AHardwareBuffer
+    // Allocate AHardwareBuffer. No CPU access — let the kernel pick GPU-
+    // coherent memory so writes from the layer's VkDevice are visible to
+    // framegen's separate VkDevice.
     AHardwareBuffer_Desc ahbDesc{
         .width = extent.width,
         .height = extent.height,
         .layers = 1,
         .format = ahbFormat,
         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT
-               | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
         .stride = 0,
         .rfu0 = 0,
         .rfu1 = 0,
@@ -151,10 +152,6 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     this->ahb = ahbHandle;
 
     // Create VkImage wrapping the AHB external memory.
-    // NOTE: We skip vkGetAndroidHardwareBufferPropertiesANDROID because
-    // the Vortek ICD wrapper doesn't pass it through. Instead we use
-    // vkGetImageMemoryRequirements after image creation to get the
-    // allocation size and memory type bits.
     VkExternalMemoryImageCreateInfo extImageInfo{
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
@@ -181,18 +178,34 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image from AHB");
 
-    // Get memory requirements from the image — this gives us allocationSize
-    // and memoryTypeBits without needing vkGetAndroidHardwareBufferPropertiesANDROID.
+    // Use AHB-properties allocationSize and memoryTypeBits when the ICD
+    // exposes the entry point (spec-required for AHB imports). Falls back to
+    // vkGetImageMemoryRequirements on ICDs that don't (e.g. Vortek).
     VkMemoryRequirements memReqs;
     Layer::ovkGetImageMemoryRequirements(device, imageHandle, &memReqs);
 
-    // Find a compatible device-local memory type from the requirements
+    VkDeviceSize allocSize = memReqs.size;
+    uint32_t memTypeBits = memReqs.memoryTypeBits;
+
+    VkAndroidHardwareBufferPropertiesANDROID ahbProps{
+        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+    };
+    auto ahbRes = Layer::ovkGetAndroidHardwareBufferPropertiesANDROID(
+        device, ahbHandle, &ahbProps);
+    if (ahbRes == VK_SUCCESS) {
+        allocSize = ahbProps.allocationSize;
+        // Spec: pick a type valid for both the image and the AHB.
+        uint32_t both = memReqs.memoryTypeBits & ahbProps.memoryTypeBits;
+        memTypeBits = both != 0 ? both : ahbProps.memoryTypeBits;
+    }
+
+    // Find a compatible device-local memory type from the chosen mask
     VkPhysicalDeviceMemoryProperties memProps;
     Layer::ovkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
 
     uint32_t typeIndex = UINT32_MAX;
     for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-        if ((memReqs.memoryTypeBits & (1u << i)) &&
+        if ((memTypeBits & (1u << i)) &&
             (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
             typeIndex = i;
             break;
@@ -201,7 +214,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     if (typeIndex == UINT32_MAX) {
         // Fallback: pick first compatible type (may not be device-local)
         for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-            if (memReqs.memoryTypeBits & (1u << i)) {
+            if (memTypeBits & (1u << i)) {
                 typeIndex = i;
                 break;
             }
@@ -223,7 +236,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     VkMemoryAllocateInfo allocInfo{
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .pNext = &importInfo,
-        .allocationSize = memReqs.size,
+        .allocationSize = allocSize,
         .memoryTypeIndex = typeIndex,
     };
     VkDeviceMemory memoryHandle{};

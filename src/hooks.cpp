@@ -22,6 +22,13 @@ using namespace Hooks;
 
 namespace {
 
+    /// True if the physical device is driven by Mesa Turnip.
+    bool isMesaTurnip(VkPhysicalDevice physicalDevice) {
+        VkPhysicalDeviceProperties props{};
+        Layer::ovkGetPhysicalDeviceProperties(physicalDevice, &props);
+        return std::string(props.deviceName).find("Turnip") != std::string::npos;
+    }
+
     ///
     /// Add extensions to the instance create info.
     ///
@@ -152,16 +159,31 @@ namespace {
         // enforce present mode
         createInfo.presentMode = Config::activeConf.e_present;
 
+        // On Mesa Turnip, override BGRA -> RGBA so the per-frame
+        // swapchain<->AHB blit doesn't swap R/B channels and feed framegen
+        // mismatched luminance.
+        const VkFormat originalFormat = pCreateInfo->imageFormat;
+        if (isMesaTurnip(deviceInfo.physicalDevice)) {
+            if (originalFormat == VK_FORMAT_B8G8R8A8_UNORM)
+                createInfo.imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+            else if (originalFormat == VK_FORMAT_B8G8R8A8_SRGB)
+                createInfo.imageFormat = VK_FORMAT_R8G8B8A8_SRGB;
+        }
+
         // retire potential old swapchain
         if (pCreateInfo->oldSwapchain) {
             swapchains.erase(pCreateInfo->oldSwapchain);
             swapchainToDeviceTable.erase(pCreateInfo->oldSwapchain);
         }
 
-        // create swapchain
+        // create swapchain; fall back to the original format if the override fails
         auto res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
+        if (res != VK_SUCCESS && createInfo.imageFormat != originalFormat) {
+            createInfo.imageFormat = originalFormat;
+            res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
+        }
         if (res != VK_SUCCESS)
-            return res; // can't be caused by lsfg-vk (yet)
+            return res;
 
         try {
             swapchainToPresent.emplace(*pSwapchain, createInfo.presentMode);
